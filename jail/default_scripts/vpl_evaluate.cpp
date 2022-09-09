@@ -2656,6 +2656,7 @@ int main(int argc, char *argv[], char **envp) {
 		fprintf(stderr, "loadTransLangLib fail");
 		return EXIT_FAILURE;
 	}
+	if(may_enhance)
 	if (!L->loadEnhacedLangLib()){
 		fprintf(stderr, "loadEnhacedLangLib fail");
 		return EXIT_FAILURE;
