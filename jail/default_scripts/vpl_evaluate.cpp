@@ -1150,6 +1150,7 @@ public:
 	bool loadParams();
 	void addFatalError(const char *m);
 	void runTests();
+	void outputEvaluationEnhance();
 	void outputEvaluation();
 };
 
