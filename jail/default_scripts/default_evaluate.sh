@@ -33,9 +33,33 @@ else
 			echo "Error need file 'vpl_evaluate.cases' to make an evaluation"
 			exit 1
 		fi
+		
+		#WIP: set move lang files to their directories
+		ENHANCE_DIR="./lang/enhance/"
+		mkdir -p "./lang/evaluate/"
+		mkdir -p $ENHANCE_DIR
+		for file in *; do
+			if [[ $file == *lang_enhance_* ]]; then
+				FILE_TYPE=${file:13}
+				FILE_TYPE_INDEX=`expr index $FILE_TYPE _`
+				mkdir -p "$ENHANCE_DIR${FILE_TYPE:0:$FILE_TYPE_INDEX-1}"
+				mv $file "./${file//"_"/"/"}"
+			elif [[ $file == *lang_evaluate_* ]]; then
+				mv $file "./${file//"_"/"/"}"
+			fi
+		done
+		
 		mv vpl_evaluate.cpp.save vpl_evaluate.cpp
 		check_program g++
-		g++ vpl_evaluate.cpp -g -lm -lutil -o .vpl_tester
+		g++ vpl_evaluate.cpp -Wall -Werror -std=c++17 -g -lm -lutil -o .vpl_tester
+
+		#WIP/POG: placeholder for setting may_enhance
+		if [ -s vpl_enhance_env.sh ]
+		then
+			cat vpl_enhance_env.sh >> vpl_execution
+			echo "" >> vpl_execution
+		fi
+
 		if [ ! -f .vpl_tester ] ; then
 			echo "Error compiling evaluation program"
 			exit 1

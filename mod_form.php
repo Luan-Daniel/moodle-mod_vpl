@@ -63,6 +63,12 @@ class mod_vpl_mod_form extends moodleform_mod {
         ) );
         $mform->setDefault( 'duedate', $endtime );
 
+        #WIP
+        #$mform->addElement( 'header', 'wip', "wip.enhance" );
+        $mform->addElement( 'header', 'vplenhance.geral', '_vplenhance_geral' );
+        $mform->addElement( 'selectyesno', 'vplenhance.use_enhance', '_vplenhance_use_enhance');
+        #ENDPOG
+
         $mform->addElement( 'header', 'submissionrestrictions', get_string( 'submissionrestrictions', VPL ) );
         $mform->addElement( 'text', 'maxfiles', get_string( 'maxfiles', VPL ) );
         $mform->setType( 'maxfiles', PARAM_INT);

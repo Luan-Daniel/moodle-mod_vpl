@@ -153,6 +153,22 @@ class mod_vpl_submission_CE extends mod_vpl_submission {
             }
         }
         if ($script == 'vpl_evaluate.sh') {
+            #WIP
+            $dirpath = dirname( __FILE__ ) . '/jail/default_scripts/lang/evaluate/';
+            $fileList = glob($dirpath . '*');
+            foreach($fileList as $filename){
+                if(is_file($filename)){
+                    $ret ['lang_evaluate_' . basename($filename)] = file_get_contents( $filename );
+                }
+            }
+            $dirpath = dirname( __FILE__ ) . '/jail/default_scripts/lang/enhance/';
+            $fileList = glob($dirpath . $pln . '/*');
+            foreach($fileList as $filename){
+                if(is_file($filename)){
+                    $ret ['lang_enhance_' . $pln . "_" . basename($filename)] = file_get_contents( $filename );
+                }
+            }
+            #ENDWIP
             $ret['vpl_evaluate.cpp'] = file_get_contents( $path . 'vpl_evaluate.cpp' );
         }
         if ($pln == 'all' && $this->vpl->has_capability( VPL_MANAGE_CAPABILITY )) { // Test all scripts.
@@ -310,6 +326,8 @@ class mod_vpl_submission_CE extends mod_vpl_submission {
                 $info .= vpl_bash_export( 'VPL_GRADEMAX',  $gradesetting->grademax );
             }
             $info .= vpl_bash_export( 'VPL_COMPILATIONFAILED', get_string( 'VPL_COMPILATIONFAILED', VPL ) );
+            //WIP
+            $info .= vpl_bash_export( 'VPL_MAYENHANCE', 'TRUE' );
         }
         $filenames = '';
         $num = 0;
@@ -557,7 +575,7 @@ class mod_vpl_submission_CE extends mod_vpl_submission {
         }
         return $response['running'] > 0;
     }
-    /**
+/**
      * Cancel running process
      * @param int $processid
      */

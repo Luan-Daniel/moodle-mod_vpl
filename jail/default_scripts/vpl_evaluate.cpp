@@ -26,6 +26,17 @@
 #include <execinfo.h>
 #include <regex.h>
 #include <string>
+#include <algorithm>
+
+//other required headers
+#include <fstream>
+#include <exception>
+#include <variant>
+#include <unordered_map>
+#include <memory>
+#include <map>
+#include <set>
+
 
 using namespace std;
 
@@ -33,6 +44,823 @@ const int MAXCOMMENTS = 20;
 const int MAXCOMMENTSLENGTH = 100*1024;
 const int MAXCOMMENTSTITLELENGTH = 1024;
 const int MAXOUTPUT = 256* 1024 ;//256Kb
+
+
+////////////////////////
+//Json Parser/////////// note: this parser is too complex, latter should try to implement a simpler one
+namespace json {
+  /* Declarations */
+
+  struct jsonWrapper;
+
+  enum json_t{Null_t=0, Bool_t, Number_t, String_t, Array_t, Object_t};
+
+  //json types
+  using Null   = std::nullptr_t;
+  using Bool   = bool;
+  using Number = long double;
+  using String = std::string;
+  using Array  = std::vector<std::shared_ptr<jsonWrapper>>;
+  using Object = std::unordered_map<String, std::shared_ptr<jsonWrapper>>;
+  using Value  = std::variant<Null, Bool, Number, String, Array, Object>;
+
+
+  struct jsonWrapper{
+    //data
+    std::shared_ptr<Value> data;
+    
+    //set
+    inline void
+    set(Value const& v);
+
+    inline void
+    operator =(jsonWrapper const& j);
+
+    inline void
+    operator =(Value const v);
+
+    //constructors
+    jsonWrapper()
+      {set(Null());}
+    jsonWrapper(std::shared_ptr<Value> const d)
+      {data = d;}
+    jsonWrapper(Value const& v)
+      {set(v);}
+    jsonWrapper(std::string const& filepath)
+      {parseFile(filepath);}
+    jsonWrapper(std::string::const_iterator begin, std::string::const_iterator const end)
+      {parse(begin, end);}
+
+    //parse
+    void inline
+    parse(std::string::const_iterator& c, std::string::const_iterator const end);
+
+    void
+    parseFile(std::string const& filepath);
+
+    //get
+    inline json_t
+    type() const;
+
+    template<typename T>
+    inline T&
+    get() const;
+
+    jsonWrapper
+    at(size_t const n) const;
+
+    jsonWrapper
+    at(String const& k) const;
+
+    jsonWrapper&
+    operator [](size_t const n);
+
+    jsonWrapper&
+    operator [](String const& k);
+
+    jsonWrapper&
+    operator ()(String const& k);
+
+    bool
+    find(std::string const& k) const;
+
+    //add
+    void
+    emplace(size_t const n, json::Value const v);
+
+    void
+    emplace(std::string const& k, json::Value const v);
+
+    void
+    emplaceFile(size_t const n, std::string const& filepath);
+
+    void
+    emplaceFile(std::string const& k, std::string const& filepath);
+
+    //destroy
+    void
+    erase(size_t n);
+
+    void
+    erase(std::string const& k);
+
+    ~jsonWrapper() = default;
+
+    //throw
+    inline void
+    throwIfItsNotAnObject() const;
+
+    inline void
+    throwIfItsNotAnArray() const;
+  };
+
+  //parse functions declaration
+  namespace parse{
+    Null
+    parseNull(std::string::const_iterator& c, std::string::const_iterator const end); //not used
+    Bool
+    parseBool(std::string::const_iterator& c, std::string::const_iterator const end); //not used
+    Number
+    parseNumber(std::string::const_iterator& c, std::string::const_iterator const end);
+    String
+    parseString(std::string::const_iterator& c, std::string::const_iterator const end);
+    Array
+    parseArray(std::string::const_iterator& c, std::string::const_iterator const end);
+    Object
+    parseObject(std::string::const_iterator& c, std::string::const_iterator const end);
+    Value
+    parseValue(std::string::const_iterator& c, std::string::const_iterator const end);
+    Value
+    parseFile(std::string const& filepath);
+  }
+
+
+  /* definitions */
+
+  //parse exception
+  class ParseError: public std::exception{
+    public:
+    ParseError(): msg("unknow"){}
+    ParseError(std::string const str): msg(str){};
+
+    virtual const char* what() const throw(){
+      return msg.c_str();
+    }
+
+    private:
+    std::string msg;
+  };
+
+  //useful functions
+  namespace tools {
+    bool
+    strMatch(std::string const& sub, std::string::const_iterator& c, std::string::const_iterator const end){
+      std::string::const_iterator spc = c;
+      std::string::const_iterator sbc = sub.begin();
+      bool res   = true;
+
+      while ((sbc!=sub.end()) && (spc!=end)){
+        if (*sbc != *spc) {res = false; break;}
+        ++spc, ++sbc;
+      }
+      if (res) c = spc;
+      return res;
+    }
+
+    bool inline
+    isWhitespace(char const c){
+      return (std::string(" \n\t\r").find(c) != std::string::npos);
+    }
+
+    char
+    parseEscapeSequence(std::string::const_iterator& c, std::string::const_iterator const end){
+      char res;
+      std::size_t new_n = 0;
+      auto shexToChar = [&c, &new_n, end](){return (char) std::stoi(std::string(c, (c+4<end)?c+4:end), &new_n, 16);};
+
+      switch (*c)
+      {
+      case '\"':  {res = '\"'; c++; break;}
+      case '\\':  {res = '\\'; c++; break;}
+      case '/':   {res = '/' ; c++; break;}
+      case 'b':   {res = '\b'; c++; break;}
+      case 'f':   {res = '\f'; c++; break;}
+      case 'n':   {res = '\n'; c++; break;}
+      case 'r':   {res = '\r'; c++; break;}
+      case 't':   {res = '\t'; c++; break;}
+      case 'u':   {c++; res = shexToChar(); c += new_n; break;}
+      default:    {throw ParseError("expected escape sequence");}
+      }
+
+      return res;
+    }
+
+    bool
+    gettext(std::string const& filepath, std::string& str){
+      std::ifstream       file(filepath, std::ifstream::in);
+      std::stringstream   text;
+      std::string         line;
+      std::string         errmsg;
+
+      if(!file.is_open()) return false;
+      while(std::getline(file, line)) text << line;
+      file.close();
+
+      str = text.str();
+      return true;
+    }
+
+    std::string
+    json_tToStr(size_t t){
+      std::vector<std::string> s {"Null", "Bool", "Number", "String", "Array", "Object"};
+      return (t!=std::variant_npos? "json::" + s.at(t): "__empty_notype__");
+    }
+  }
+
+  //jsonWrapper methods
+  void inline
+  jsonWrapper::parse(std::string::const_iterator& c, std::string::const_iterator const end){
+    data = std::make_shared<Value>(parse::parseValue(c, end));
+  }
+
+  void
+  jsonWrapper::parseFile(std::string const& filepath){
+    data = std::make_shared<Value>(parse::parseFile(filepath));
+  }
+
+  template<typename T>
+  inline T&
+  jsonWrapper::get() const{
+    return std::get<T>(*data);
+  }
+
+  inline json_t
+  jsonWrapper::type() const{
+    return json_t(data->index());
+  }
+
+  jsonWrapper
+  jsonWrapper::at(size_t const n) const{
+    throwIfItsNotAnArray();
+    return (*(get<Array>().at(n)));
+  }
+
+  jsonWrapper
+  jsonWrapper::at(String const& k) const{
+    throwIfItsNotAnObject();
+    return (*(get<Object>().at(k)));
+  }
+
+  jsonWrapper&
+  jsonWrapper::operator [](size_t const n){
+    throwIfItsNotAnArray();
+    return (*(get<Array>()[n]));
+  }
+
+  jsonWrapper&
+  jsonWrapper::operator [](String const& k){
+    throwIfItsNotAnObject();
+    //if('k' is not found) emplace 'k' as json::Null
+    if (!find(k))
+      get<Object>().emplace(k, std::make_shared<jsonWrapper>());
+    return (*(get<Object>()[k]));
+  }
+
+  jsonWrapper&
+  jsonWrapper::operator ()(String const& k){
+    //if('k' is not found) emplace 'k' as json::Object
+    get<Object>().emplace(k, std::make_shared<jsonWrapper>(Object()));
+    return *(get<Object>()[k]);
+  }
+
+  bool
+  jsonWrapper::find(std::string const& k) const{
+    throwIfItsNotAnObject();
+    return (get<Object>().find(k) != get<Object>().end());
+  }
+  
+  inline void
+  jsonWrapper::set(Value const& v){
+    data = std::make_shared<Value>(v);
+  }
+
+  inline void
+  jsonWrapper::operator =(jsonWrapper const& j){
+    data = j.data;
+  }
+
+  inline void
+  jsonWrapper::operator =(Value const v){
+    data = std::make_shared<Value>(v);
+  }
+
+  void
+  jsonWrapper::emplace(size_t const n, json::Value const v){
+    throwIfItsNotAnArray();
+    get<Array>().emplace(get<Array>().begin()+n, std::make_shared<jsonWrapper>(std::make_shared<Value>(v)));
+  }
+
+  void
+  jsonWrapper::emplace(std::string const& k, json::Value const v){
+    throwIfItsNotAnObject();
+    get<Object>().emplace(k, std::make_shared<jsonWrapper>(std::make_shared<Value>(v)));
+  }
+
+  void
+	jsonWrapper::emplaceFile(size_t const n, std::string const& filepath){
+    throwIfItsNotAnArray();
+    emplace(n, parse::parseFile(filepath));
+  }
+
+	void
+	jsonWrapper::emplaceFile(std::string const& k, std::string const& filepath){
+    throwIfItsNotAnObject();
+    emplace(k, parse::parseFile(filepath));
+  }
+
+  void
+  jsonWrapper::erase(size_t n){
+    throwIfItsNotAnArray();
+    get<Array>().erase(get<Array>().begin()+n);
+  }
+
+  void
+  jsonWrapper::erase(std::string const& k){
+    throwIfItsNotAnObject();
+    get<Object>().erase(k);
+  }
+
+  inline void
+  jsonWrapper::throwIfItsNotAnObject() const{
+    if(type() != Object_t)
+      throw std::out_of_range("not an Object: type()=="+tools::json_tToStr(data->index())+'\n');
+  }
+
+  inline void
+  jsonWrapper::throwIfItsNotAnArray() const{
+    if(type() != Array_t)
+      throw std::out_of_range("not an Array: type()=="+tools::json_tToStr(data->index())+'\n');
+  }
+
+  //parse functions
+  namespace parse{
+    Null
+    parseNull(std::string::const_iterator& c, std::string::const_iterator const end){
+      if (tools::strMatch("null", c, end)) {return Null{};}
+      else throw ParseError("expected Null type: 'null'");
+    }
+
+    Bool
+    parseBool(std::string::const_iterator& c, std::string::const_iterator const end){
+      if (tools::strMatch("false", c, end)) {return Bool{false};}
+      else
+      if (tools::strMatch("true", c, end))  {return Bool{true};}
+      else throw ParseError("expected Bool type: 'true' or 'false'");
+    }
+
+    Number
+    parseNumber(std::string::const_iterator& c, std::string::const_iterator const end){
+      std::size_t new_n = 0;
+      Number res = 0;
+      try{
+        res = std::stod(std::string(c, end), &new_n);
+        c += new_n;
+      }
+      catch(std::invalid_argument()){
+        throw ParseError("expected Number type");
+      }
+
+      return res;
+    }
+
+    String
+    parseString(std::string::const_iterator& c, std::string::const_iterator const end){
+        std::string res;
+        bool str_ended  = false;
+
+        if (*c=='\"') c++;
+        while( c != end && !str_ended ){
+          switch (*c)
+          {
+          case '\\':  {c++; res += tools::parseEscapeSequence(c, end); break;}
+          case '\"':  {str_ended = true; c++; break;}
+          default:    {res += *c; c++; break;}
+          }
+        }
+        if (!str_ended)
+            throw ParseError("expected '\"'");
+
+        return res;
+    }
+
+    Array
+    parseArray(std::string::const_iterator& c, std::string::const_iterator const end){
+      Array res;
+      bool arr_ended    = false;
+      bool expect_value = true;
+      bool got_value    = false;
+      if (*c=='[') c++;
+
+      while( c != end && !arr_ended ){
+        if (tools:: isWhitespace(*c))
+            {c++; continue;}
+        switch (*c){
+        case ',': {
+            if(!got_value)
+                throw ParseError("expected value");
+            got_value       = false;
+            expect_value    = true;
+            c++;
+            break;
+        }
+        case ']': {
+            if(!got_value && !res.size())
+                throw ParseError("expected Value");
+            arr_ended       = true;
+            c++;
+            break;
+        }
+        default:  {
+            if(!expect_value && got_value)
+                throw ParseError("expected ',' or ']'");
+            got_value       = true;
+            expect_value    = false;
+            std::shared_ptr<jsonWrapper> new_wrapper = std::make_shared<jsonWrapper>(std::make_shared<Value>(parseValue(c, end)));
+            res.push_back(new_wrapper);
+            break;
+        }
+        }
+      }
+
+      if (!arr_ended) throw ParseError("expected ']'");
+      return res;
+    }
+
+    Object
+    parseObject(std::string::const_iterator& c, std::string::const_iterator const end){
+      Object res;
+      bool obj_ended    = false;
+      bool expect_value = true;
+      bool got_value    = false;
+
+      if (*c=='{') c++;
+
+      while( c != end && !obj_ended ){
+        if (tools:: isWhitespace(*c))
+            {c++; continue;}
+
+        switch (*c){
+        case ',': {
+            if(!got_value)
+                throw ParseError("expected value");
+            got_value       = false;
+            expect_value    = true;
+            c++;
+            break;
+        }
+        case '}': {
+            if(!got_value && !res.size())
+                throw ParseError("expected Value");
+            obj_ended       = true;
+            c++;
+            break;
+        }
+        default:  {
+            if(!expect_value && got_value)
+                throw ParseError("expected ',' or '}'");
+            got_value       = true;
+            expect_value    = false;
+            std::string name = parseString(c, end);
+            while (tools::isWhitespace(*c) && c!=end)
+                {c++; continue;}
+            if(*c!=':' || c==end)
+                throw ParseError("expected ':'");
+            c++;
+            res[name] = std::make_shared<jsonWrapper>(std::make_shared<Value>(parseValue(c, end)));
+            break;
+        }
+        }
+      }
+
+      if (!obj_ended) throw ParseError("expected '}'");
+      return res;
+    }
+
+    Value
+    parseValue(std::string::const_iterator& c, std::string::const_iterator const end){
+      Value value;
+      if (c == end) return {};
+      while(c != end) {
+        if (tools::isWhitespace(*c))                {c++; continue;}
+        else if (*c == '{')                         return parseObject(c, end);
+        else if (*c == '\"')                        return parseString(c, end);
+        else if (*c == '[')                         return parseArray(c, end);
+        else if (*c == '-' || std::isdigit(*c))     return parseNumber(c, end);
+        else if (*c == 'f'){
+          if(tools::strMatch("false", c, end))
+            return Bool{false};
+          else throw ParseError("invalid input");
+        }
+        else if (*c == 't'){
+          if(tools::strMatch("true", c, end))
+            return Bool{true};
+          else throw ParseError("invalid input");
+        }
+        else if (*c == 'n'){
+          if(tools::strMatch("null", c, end))
+            return Null{};
+          else throw ParseError("invalid input");
+        }
+        else throw ParseError("invalid input");
+      }
+
+      return value;
+    }
+
+    Value
+    parseFile(std::string const& filepath){
+      std::string text;
+      if(!tools::gettext(filepath, text))
+        throw ParseError('"'+filepath+"\" could not be opened.");
+      std::string::const_iterator c = text.begin();
+      return parseValue(c, text.end());
+    }
+  }
+}
+
+///////////////////////////
+// End of Json Parser//////
+
+//extra tools
+std::map<string, string> lang_map ={
+  {"pt_PT.UTF-8", "br"},
+  {"en_US.UTF-8", "en"}
+};
+
+std::map<string, string> ext_map ={
+  {"ada", "ada"},
+  {"adb", "ada"},
+  {"ads", "ada"},
+  {"all", "all"},
+  {"asm", "asm"},
+  {"c", "c"},
+  {"cc", "cpp"},
+  {"cpp", "cpp"},
+  {"C", "cpp"},
+  {"c++", "cpp"},
+  {"clj", "clojure"},
+  {"cs", "csharp"},
+  {"d", "d"},
+  {"erl", "erlang"},
+  {"go", "go"},
+  {"groovy", "groovy"},
+  {"java", "java"},
+  {"js", "javascript"},
+  {"scala", "scala"},
+  {"sql", "sql"},
+  {"scm", "scheme"},
+  {"s", "mips"},
+  {"kt", "kotlin"},
+  {"lisp", "lisp"},
+  {"lsp", "lisp"},
+  {"lua", "lua"},
+  {"sh", "shell"},
+  {"pas", "pascal"},
+  {"p", "pascal"},
+  {"f77", "fortran"},
+  {"f90", "fortran"},
+  {"f", "fortran"},
+  {"for", "fortran"},
+  {"pl", "prolog"},
+  {"pro", "prolog"},
+  {"htm", "html"},
+  {"html", "html"},
+  {"hs", "haskell"},
+  {"m", "matlab"},
+  {"mzn", "minizinc"},
+  {"perl", "perl"},
+  {"prl", "perl"},
+  {"php", "php"},
+  {"py", "python"},
+  {"v", "verilog"},
+  {"vh", "verilog"},
+  {"vhd", "verilog"},
+  {"vhdl", "verilog"},
+  {"r", "r"},
+  {"R", "r"},
+  {"rb", "ruby"},
+  {"ruby", "ruby"},
+  {"ts", "typescript"}
+};
+
+string inline
+getFileExtension(string const& file){
+  return string(file.begin() + file.rfind('.') +1, file.end());
+}
+
+template<typename T>
+vector<T> inline
+setToVector(set<T> const& s){
+  return vector<T>(s.begin(), s.end());
+}
+
+namespace tokentools{
+  vector<string>
+  strsplt(string const& str, string const& delim){
+    string split;
+    vector<string> v;
+    size_t i=0, c=0;
+    while(i!=std::string::npos){
+      i = str.find(delim, c);
+      split = str.substr(c, (i==std::string::npos?i:i-c));
+      v.emplace_back(split);
+      c = i+delim.size();
+    }
+    return v;
+  }
+
+  std::vector<std::string>
+  gettkns(std::string const& str, std::string const& form, std::string const& tkn="&$var"){
+    std::vector<std::string> const splt = strsplt(form, tkn);
+    std::vector<std::string> tkns;
+    size_t c1=0, s1=0;
+    for(size_t i=0; i<splt.size(); i++){
+      c1 = str.find(splt[i], c1+s1)+splt[i].size();
+      s1 = (i+1<splt.size()? str.find(splt[i+1], c1) - c1: std::string::npos);
+      tkns.emplace_back(str.substr(c1,s1));
+    }
+    return tkns;
+  }
+
+  std::string
+  puttkns(std::string const& form, std::vector<std::string> const& tkns, std::string const& tkn="&$var"){
+    std::vector<std::string> const splt = strsplt(form, tkn);
+    std::string res;
+    for(size_t i=0; i<splt.size(); i++){
+      res += splt[i];
+      if(i<tkns.size()) res += tkns[i];
+    }
+    return res;
+  }
+}
+
+bool may_enhance=false;
+
+
+//translate/enhance interface
+struct Interface{
+  /* data */
+	string const
+  dirEvaluate
+    = "./lang/evaluate/";
+
+  string const
+  dirEnhance
+    = "./lang/enhance/";
+
+	string
+  _lang;
+
+  vector<string>
+  _files;
+
+	json::jsonWrapper
+  evaluate;
+  json::jsonWrapper
+  enhance;
+
+  bool _loaded_evaluate=false, _loaded_enhance=false;
+
+  /* methods */
+	Interface(vector<string> const& files){
+    _files = files;
+    _lang = "en";
+    evaluate.set(json::Value(json::Object()));
+    enhance.set(json::Value(json::Object()));
+  }
+
+	Interface(vector<string> const& files, string lang){
+    _files = files;
+    _lang = lang;
+    evaluate.set(json::Value(json::Object()));
+    enhance.set(json::Value(json::Object()));
+  }
+
+	bool
+  loadTransLangLib(){
+    try{
+      evaluate.emplaceFile("en", dirEvaluate + "en.json");
+      string const filename = dirEvaluate + _lang + ".json";
+      std::ifstream file(filename);
+      if (file.is_open()){
+        string line, text;
+        while(std::getline(file, line)) text += line;
+        file.close();
+        std::string::const_iterator c(text.begin());
+        evaluate(_lang) = json::parse::parseValue(c, text.end());
+      }
+      else{
+        evaluate(_lang) = evaluate["en"];
+      }
+      _loaded_evaluate = true;
+    }
+    catch (json::ParseError &e){
+      fprintf(stdout, "json: ParseError: %s\n", e.what());
+      _loaded_evaluate = false;
+    }
+    catch (std::out_of_range &e){
+      fprintf(stdout, "json: out_of_range: %s\n", e.what());
+      _loaded_evaluate = false;
+    }
+
+		return _loaded_evaluate;
+	}
+
+  bool
+  loadEnhacedLangLib(){
+    try{
+      for(string& _file : _files){
+        enhance(_file).emplaceFile("default", dirEnhance + _file + '/' + "default.json");
+        string const 	filename = dirEnhance + _file + '/' + _lang + ".json";
+        std::ifstream file(filename);
+        if (file.is_open()){
+          string line, text;
+          while(std::getline(file, line)) text += line;
+          file.close();
+          std::string::const_iterator c(text.begin());
+          enhance(_file)(_lang) = json::parse::parseValue(c, text.end());
+          continue;
+        }
+        enhance(_file)(_lang) = enhance[_file]["default"];
+      }
+      _loaded_enhance = true;
+    }
+    catch (json::ParseError &e){
+      fprintf(stdout, "json parser error: %s\n", e.what());
+      _loaded_enhance = false;
+    }
+    catch (std::out_of_range &e){
+      fprintf(stdout, "json acess error: %s\n", e.what());
+      _loaded_enhance = false;
+    }
+
+    return _loaded_enhance;
+  }
+
+  string
+  langEvaluate(int const id){
+    if(evaluate.find(_lang)){
+      if(evaluate.at(_lang).find(to_string(id)))
+        return evaluate.at(_lang).at(to_string(id)).get<json::String>();
+    }
+    else if(evaluate.find("en")){
+      if(evaluate.at("en").find(to_string(id)))
+        return evaluate.at("en").at(to_string(id)).get<json::String>();
+    }
+    throw std::out_of_range("langEvaluate error: missing 'id'");
+  }
+
+  std::pair<string, std::vector<std::string>>
+  _getridtkns(string const& info, string const& file){
+    json::Object const df = enhance[file]["default"].get<json::Object>();
+    for (auto const& [id, _data] : df){
+      auto data = _data->get<json::String>();
+      if (data.find("&$var")!=string::npos){
+        vector<string> v = tokentools::strsplt(data, "&$var");
+        bool match = true;
+        for(string const& s: v){
+          if(info.find(s)==string::npos){
+            vector<string>().swap(v);
+            match = false;
+            break;
+          }
+        }
+        if (match){
+          vector<string> rt = tokentools::gettkns(info, data);
+          return {id, rt};
+        }
+      }
+      else if(info == data) return {id, vector<string>()};
+    }
+    return {"", vector<string>()};
+  }
+
+  // WIP
+  string
+  enhanceMessageDiv(string const& info, string const& file=""){
+    string const fl = (file==""? _files.at(0): file);
+    auto [id, tkn] = _getridtkns(info, fl);
+    if(id=="")
+      return "<case>" + info;
+    if(tkn.size()==0)
+      return "<caseEnhanced>" + enhance[fl][_lang][id].get<json::String>() + "<caseOriginal>" + info;
+    return "<caseEnhanced>"
+    + tokentools::puttkns(
+      enhance[fl][_lang][id].get<json::String>(),
+      tkn
+      )
+    + "<caseOriginal>"
+    + info;
+  }
+
+  string
+  enhanceMessage(string const& info, string const& file=""){
+    string const fl = (file==""? _files.at(0): file);
+    auto [id, tkn] = _getridtkns(info, fl);
+    if(id=="")
+      return info;
+    if(tkn.size()==0)
+      return enhance[fl][_lang][id].get<json::String>();
+    return
+      tokentools::puttkns(
+      enhance[fl][_lang][id].get<json::String>(),
+      tkn
+      );
+  }
+};
+
+Interface* L;
+
 
 /**
  * Class Tools Declaration
@@ -43,7 +871,7 @@ public:
 	static string readFile(string name);
 	static vector<string> splitLines(const string &data);
 	static int nextLine(const string &data);
-	static string caseFormat(string text);
+	static string caseFormat(string text, bool enhance/*=false||may_enhance*/);
 	static string toLower(const string &text);
 	static string normalizeTag(const string &text);
 	static bool parseLine(const string &text, string &name, string &data);
@@ -399,12 +1227,12 @@ int Tools::nextLine(const string &data) {
 	return l;
 }
 
-string Tools::caseFormat(string text) {
+string Tools::caseFormat(string text, bool enhance=false) {
 	vector<string> lines = Tools::splitLines(text);
 	string res;
 	int nlines = lines.size();
 	for (int i = 0; i < nlines; i++)
-		res += ">" + lines[i] + '\n';
+		res += (enhance||may_enhance ? L->enhanceMessage(lines[i]) : lines[i]) + '\n';
 	return res;
 }
 
@@ -504,7 +1332,7 @@ const char* Tools::getenv(const char* name, const char* defaultvalue) {
 	const char* value = ::getenv(name);
 	if ( value == NULL ) {
 		value = defaultvalue;
-	    printf("Warning: using default value '%s' for '%s'\n", defaultvalue, name);
+	    printf((L->langEvaluate(1)).c_str(), defaultvalue, name);
 	}
 	return value; // Fixes bug found by Peter Svec
 }
@@ -515,7 +1343,7 @@ double Tools::getenv(const char* name, double defaultvalue) {
 	if ( svalue != NULL ) {
 		Tools::convert2(svalue, value);
 	} else {
-		printf("Warning: using default value '%lf' for '%s'\n", defaultvalue, name);
+		printf((L->langEvaluate(1)).c_str(), defaultvalue, name);
 	}
 	return value;
 }
@@ -686,7 +1514,7 @@ bool NumbersOutput::typeMatch(const string& text){
 }
 
 string NumbersOutput::type(){
-	return "numbers";
+	return (L->langEvaluate(3)).c_str();
 }
 
 NumbersOutput::operator string () const{
@@ -750,7 +1578,7 @@ bool TextOutput::typeMatch(const string& text) {
 }
 
 string TextOutput::type(){
-	return "text";
+	return (L->langEvaluate(4)).c_str();
 }
 
 /**
@@ -809,7 +1637,7 @@ bool ExactTextOutput::typeMatch(const string& text){
 }
 
 string ExactTextOutput::type(){
-	return "exact text";
+	return (L->langEvaluate(5)).c_str();
 }
 
 /**
@@ -817,7 +1645,6 @@ string ExactTextOutput::type(){
  */
 
 RegularExpressionOutput::RegularExpressionOutput(const string &text, const string &actualCaseDescription):OutputChecker(text) {
-
 	errorCase = actualCaseDescription;
 	size_t pos = 1;
 	flagI = false;
@@ -832,7 +1659,6 @@ RegularExpressionOutput::RegularExpressionOutput(const string &text, const strin
 		pos = pos + 1;
 		// Flags processing
 		while (pos < clean.size()) {
-
 			switch (clean[pos]) {
 				case 'i':
 					flagI=true;
@@ -849,7 +1675,7 @@ RegularExpressionOutput::RegularExpressionOutput(const string &text, const strin
 					stringstream ss;
 					ss << wrongFlag;
 					ss >> flagCatch;
-					string errorType = string("Error: invalid flag in regex output ")+ string(errorCase)+ string (", found a ") + string(flagCatch) + string (" used as a flag, only i and m available.");
+					string errorType = string((L->langEvaluate(39)).c_str())+ string(errorCase)+ string ((L->langEvaluate(40)).c_str()) + string(flagCatch) + string ((L->langEvaluate(41)).c_str());
 					const char* flagError = errorType.c_str();
 					p_ErrorTest->addFatalError(flagError);
 					p_ErrorTest->outputEvaluation();
@@ -893,7 +1719,7 @@ bool RegularExpressionOutput::match (const string& output) {
 
 		} else { // Memory Error
 			Evaluation* p_ErrorTest = Evaluation::getSinglenton();
-			string errorType = string("Error: out of memory error, during matching case ") + string(errorCase);
+			string errorType = string((L->langEvaluate(6)).c_str()) + string(errorCase);
 			const char* flagError = errorType.c_str();
 			p_ErrorTest->addFatalError(flagError);
 			p_ErrorTest->outputEvaluation();
@@ -905,7 +1731,7 @@ bool RegularExpressionOutput::match (const string& output) {
         char* bff = new char[length + 1];
         (void) regerror(reti, &expression, bff, length);
 		Evaluation* p_ErrorTest = Evaluation::getSinglenton();
-		string errorType = string("Error: regular expression compilation error")+string (" in case: ")+ string(errorCase) +string (".\n")+ string(bff);
+		string errorType = string((L->langEvaluate(7)).c_str()) + string((L->langEvaluate(8)).c_str()) + string(errorCase) + string(".\n")+ string(bff);
 		const char* flagError = errorType.c_str();
 		p_ErrorTest->addFatalError(flagError);
 		p_ErrorTest->outputEvaluation();
@@ -935,7 +1761,7 @@ bool RegularExpressionOutput::typeMatch(const string& text) {
 }
 
 string RegularExpressionOutput::type() {
-	return "regular expression";
+	return (L->langEvaluate(9)).c_str();
 }
 /**
  * Class Case Definitions
@@ -1221,7 +2047,7 @@ string TestCase::getCaseDescription(){
 string TestCase::getCommentTitle(bool withGradeReduction=false) {
 	char buf[100];
 	string ret;
-	sprintf(buf, "Test %d", id);
+	sprintf(buf, (L->langEvaluate(10)).c_str(), id);
 	ret = buf;
 	if (caseDescription.size() > 0) {
 		ret += ": " + caseDescription;
@@ -1241,13 +2067,13 @@ string TestCase::getComment() {
 	char buf[100];
 	string ret;
 	if(output.size()==0){
-		ret += "Configuration error in the test case: the output is not defined";
+		ret += (L->langEvaluate(11)).c_str();
 	}
 	if (programTimeout) {
-		ret += "Program timeout\n";
+		ret += (L->langEvaluate(12)).c_str();
 	}
 	if (outputTooLarge) {
-		sprintf(buf, "Program output too large (%dKb)\n", sizeReaded / 1024);
+		sprintf(buf, (L->langEvaluate(13)).c_str(), sizeReaded / 1024);
 		ret += buf;
 	}
 	if (executionError) {
@@ -1255,20 +2081,20 @@ string TestCase::getComment() {
 	}
 	if (isExitCodeTested() && ! correctExitCode) {
 		char buf[250];
-		sprintf(buf, "Incorrect exit code. Expected %d, found %d\n", expectedExitCode, exitCode);
+		sprintf(buf, (L->langEvaluate(14)).c_str(), expectedExitCode, exitCode);
 		ret += buf;
 	}
 	if (! correctOutput) {
 		if (failMessage.size()) {
 			ret += failMessage + "\n";
 		} else {
-			ret += "Incorrect program output\n";
-			ret += " --- Input ---\n";
+			ret += (L->langEvaluate(15)).c_str();
+			ret += (L->langEvaluate(16)).c_str();
 			ret += Tools::caseFormat(input);
-			ret += "\n --- Program output ---\n";
+			ret += (L->langEvaluate(17)).c_str();
 			ret += Tools::caseFormat(programOutputBefore + programOutputAfter);
 			if(output.size()>0){
-				ret += "\n --- Expected output ("+output[0]->type()+")---\n";
+				ret += (L->langEvaluate(18)).c_str()+output[0]->type()+")\n";
 				ret += Tools::caseFormat(output[0]->studentOutputExpected());
 			}
 		}
@@ -1318,7 +2144,7 @@ void TestCase::runTest(time_t timeout) {// Timeout in seconds
 	int pp2[2]; // Receive data
 	if (pipe(pp1) == -1 || pipe(pp2) == -1) {
 		executionError = true;
-		sprintf(executionErrorReason, "Internal error: pipe error (%s)",
+		sprintf(executionErrorReason, (L->langEvaluate(19)).c_str(),
 				strerror(errno));
 		return;
 	}
@@ -1327,7 +2153,7 @@ void TestCase::runTest(time_t timeout) {// Timeout in seconds
 	}
 	if ( ! Tools::existFile(command) ){
 		executionError = true;
-		sprintf(executionErrorReason, "Execution file not found '%s'", command);
+		sprintf(executionErrorReason, (L->langEvaluate(20)).c_str(), command);
 		return;
 	}
 	pid_t pid;
@@ -1343,12 +2169,12 @@ void TestCase::runTest(time_t timeout) {// Timeout in seconds
 		dup2(STDOUT_FILENO, STDERR_FILENO);
 		setpgrp();
 		execve(command, (char * const *) argv, (char * const *) envv);
-		perror("Internal error, execve fails");
+		perror((L->langEvaluate(21)).c_str());
 		abort(); //end of child
 	}
 	if (pid == -1) {
 		executionError = true;
-		sprintf(executionErrorReason, "Internal error: fork error (%s)",
+		sprintf(executionErrorReason, (L->langEvaluate(22)).c_str(),
 				strerror(errno));
 		return;
 	}
@@ -1392,7 +2218,7 @@ void TestCase::runTest(time_t timeout) {// Timeout in seconds
 			int signal = WTERMSIG(status);
 			executionError = true;
 			sprintf(executionErrorReason,
-					"Program terminated due to \"%s\" (%d)\n", strsignal(
+					(L->langEvaluate(23)).c_str(), strsignal(
 							signal), signal);
 		}
 		if (WIFEXITED(status)) {
@@ -1400,11 +2226,11 @@ void TestCase::runTest(time_t timeout) {// Timeout in seconds
 		} else {
 			executionError = true;
 			strcpy(executionErrorReason,
-					"Program terminated but unknown reason.");
+					(L->langEvaluate(24)).c_str());
 		}
 	} else if (pidr != 0) {
 		executionError = true;
-		strcpy(executionErrorReason, "waitpid error");
+		strcpy(executionErrorReason, (L->langEvaluate(25)).c_str());
 	}
 	readWrite(fdread, fdwrite);
 	correctExitCode = isExitCodeTested() && expectedExitCode == exitCode;
@@ -1594,7 +2420,7 @@ void Evaluation::loadTestCases(string fname) {
 			} else {
 				if ( line.size() > 0 ) {
 					char buf[250];
-					sprintf(buf,"Syntax error: unexpected line %d ", i+1);
+					sprintf(buf,(L->langEvaluate(26)).c_str(), i+1);
 					addFatalError(buf);
 				}
 			}
@@ -1636,7 +2462,7 @@ void Evaluation::runTests() {
 		return;
 	}
 	if (maxtime < 0) {
-		addFatalError("Global timeout");
+		addFatalError((L->langEvaluate(27)).c_str());
 		return;
 	}
 	nerrors = 0;
@@ -1645,10 +2471,10 @@ void Evaluation::runTests() {
 	float defaultGradeReduction = (grademax - grademin) / testCases.size();
 	int timeout = maxtime / testCases.size();
 	for (size_t i = 0; i < testCases.size(); i++) {
-		printf("Testing %lu/%lu : %s\n", (unsigned long) i+1, (unsigned long)testCases.size(), testCases[i].getCaseDescription().c_str());
+		printf((L->langEvaluate(28)).c_str(), (unsigned long) i+1, (unsigned long)testCases.size(), testCases[i].getCaseDescription().c_str());
 		if (timeout <= 1 || Timer::elapsedTime() >= maxtime) {
 			grade = grademin;
-			addFatalError("Global timeout");
+			addFatalError((L->langEvaluate(27)).c_str());
 			return;
 		}
 		if (maxtime - Timer::elapsedTime() < timeout) { // Try to run last case
@@ -1680,6 +2506,51 @@ void Evaluation::runTests() {
 			}
 		}
 	}
+}
+
+// WIP
+void Evaluation::outputEvaluationEnhance() {
+	const char* stest[] = {(L->langEvaluate(29)).c_str(), (L->langEvaluate(30)).c_str()};
+	if (testCases.size() == 0) {
+		printf("<|--\n");
+		printf("%s", (L->langEvaluate(36)).c_str());
+		printf("--|>\n");
+	}
+	if (ncomments > 1) {
+		printf("\n<|--\n");
+		printf("%s", (L->langEvaluate(31)).c_str());
+		for (int i = 0; i < ncomments; i++) {
+			printf("<comment>%s", titles[i]);
+		}
+		printf("--|>\n");
+	}
+	if ( ncomments > 0 ) {
+		printf("\n<|--\n");
+		for (int i = 0; i < ncomments; i++) {
+			printf("<subTitle>%s", titlesGR[i]);
+			printf("%s\n", comments[i]);
+		}
+		printf("--|>\n");
+	}
+	int passed = nruns - nerrors;
+	if ( nruns > 0 ) {
+		printf("%s",(L->langEvaluate(32)).c_str());
+		printf("%s",(L->langEvaluate(33)).c_str());
+		printf((L->langEvaluate(34)).c_str(),
+				nruns, nruns==1?stest[0]:stest[1],
+				passed, passed==1?stest[0]:stest[1]); // Taken from Dominique Thiebaut
+		printf("%s",(L->langEvaluate(33)).c_str());
+		printf("\n--|>\n");
+	}
+	if ( ! noGrade ) {
+		char buf[100];
+		sprintf(buf, "%5.2f", grade);
+		int len = strlen(buf);
+		if (len > 3 && strcmp(buf + (len - 3), ".00") == 0)
+			buf[len - 3] = 0;
+		printf((L->langEvaluate(35)).c_str(), buf);
+	}
+	fflush(stdout);
 }
 
 void Evaluation::outputEvaluation() {
@@ -1740,9 +2611,9 @@ void signalCatcher(int n) {
 	}
 	Evaluation *obj = Evaluation::getSinglenton();
 	if (n == SIGTERM) {
-		obj->addFatalError("Global test timeout (TERM signal received)");
+		obj->addFatalError((L->langEvaluate(37)).c_str());
 	} else {
-		obj->addFatalError("Internal test error");
+		obj->addFatalError((L->langEvaluate(38)).c_str());
 		obj->outputEvaluation();
 		Stop::setTERMRequested();
 		abort();
@@ -1764,14 +2635,40 @@ void setSignalsCatcher() {
 	signal(SIGTERM, signalCatcher);
 }
 
-int main(int argc, char *argv[], const char **env) {
+int main(int argc, char *argv[], char **envp) {
+
+	// get enviroment variables
+	char* e = getenv("VPL_ENHANCE");
+	string enhance_env((e==nullptr)?"":e);
+  
+	may_enhance = 
+	(enhance_env=="true"||enhance_env=="TRUE");
+
+	string file0(getenv("VPL_SUBFILE0"));
+	vector<string> p = {ext_map.at(getFileExtension(file0))};
+	string lang(lang_map.at(getenv("VPL_LANG")));
+
+	// load error messages
+	L = new Interface( p, lang);
+
+	if (!L->loadTransLangLib()){
+		fprintf(stderr, "loadTransLangLib fail");
+		return EXIT_FAILURE;
+	}
+	if (!L->loadEnhacedLangLib()){
+		fprintf(stderr, "loadEnhacedLangLib fail");
+		return EXIT_FAILURE;
+	}
+
 	Timer::start();
-	TestCase::setEnvironment(env);
+	TestCase::setEnvironment((const char**) envp);
 	setSignalsCatcher();
 	Evaluation* obj = Evaluation::getSinglenton();
 	obj->loadParams();
 	obj->loadTestCases("evaluate.cases");
 	obj->runTests();
 	obj->outputEvaluation();
+	delete L;
+
 	return EXIT_SUCCESS;
 }
