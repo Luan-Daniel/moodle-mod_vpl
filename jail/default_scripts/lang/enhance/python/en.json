@@ -29,5 +29,6 @@
     "28": "TypeError: Can't convert &$var object to str implicitly",
     "29": "TypeError: &$var object is not subscriptable",
     "30": "TypeError: string indices must be integers",
-    "31": "SyntaxError: can't assign to function call"
+    "31": "SyntaxError: can't assign to function call",
+    "32": "SyntaxError: unterminated string literal (detected at line &$var)"
 }

@@ -572,10 +572,18 @@ namespace json {
 // End of Json Parser//////
 
 //extra tools
-std::map<string, string> lang_map ={
+const std::map<const string, const string> idiom_map ={
   {"pt_PT.UTF-8", "br"},
-  {"en_US.UTF-8", "en"}
+  {"en_US.UTF-8", "en"},
+  {"es_ES.UTF-8", "es"}
 };
+
+std::string
+get_idiom(const std::string& s){
+	if(idiom_map.count(s)>0)
+		return idiom_map.at(s);
+	return "en";
+}
 
 std::map<string, string> ext_map ={
   {"ada", "ada"},
@@ -2647,7 +2655,7 @@ int main(int argc, char *argv[], char **envp) {
 
 	string file0(getenv("VPL_SUBFILE0"));
 	vector<string> p = {ext_map.at(getFileExtension(file0))};
-	string lang(lang_map.at(getenv("VPL_LANG")));
+	string lang(get_idiom(getenv("VPL_LANG")));
 
 	// load error messages
 	L = new Interface( p, lang);
